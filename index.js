@@ -1,5 +1,9 @@
-const sodium = require('sodium-universal')
+const sodium = require('sodium-native')
 const uint64be = require('uint64be')
+
+const one = Buffer.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+one.fill(0)
+one[0] = 1
 
 // https://en.wikipedia.org/wiki/Merkle_tree#Second_preimage_attack
 const LEAF_TYPE = Buffer.from([0])
@@ -66,27 +70,52 @@ exports.remoteCapability = function (key, split) {
   return out
 }
 
-exports.keyPair = function (seed) {
-  const publicKey = Buffer.allocUnsafe(sodium.crypto_sign_PUBLICKEYBYTES)
-  const secretKey = Buffer.allocUnsafe(sodium.crypto_sign_SECRETKEYBYTES)
-
-  if (seed) sodium.crypto_sign_seed_keypair(publicKey, secretKey, seed)
-  else sodium.crypto_sign_keypair(publicKey, secretKey)
-
+exports.keyPair = function () {
+  const sk = Buffer.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+  const pk = Buffer.alloc(sodium.crypto_core_ristretto255_BYTES)
+  sodium.crypto_core_ristretto255_scalar_random(sk)
+  sodium.crypto_scalarmult_ristretto255_base(pk, sk)
   return {
-    publicKey,
-    secretKey
+    publicKey: pk,
+    secretKey: sk
   }
 }
 
-exports.sign = function (message, secretKey) {
-  const signature = Buffer.allocUnsafe(sodium.crypto_sign_BYTES)
-  sodium.crypto_sign_detached(signature, message, secretKey)
-  return signature
+exports.sign = function (m, sk) {
+  if (typeof m === 'string') m = Buffer.from(m)
+  if (typeof sk === 'string') sk = Buffer.from(sk, 'hex')
+  const k = Buffer.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+  const eBytes = Buffer.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+  const e = Buffer.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+  const xe = Buffer.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+  const s = Buffer.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+  const r = Buffer.alloc(sodium.crypto_core_ristretto255_BYTES)
+  sodium.crypto_core_ristretto255_scalar_random(k) // k
+  sodium.crypto_scalarmult_ristretto255_base(r, k) // r = k*g
+  sodium.crypto_generichash(eBytes, Buffer.concat([r, m])) // e = hash(r|m)
+  bytesToScalar(e, eBytes)
+  sodium.crypto_core_ristretto255_scalar_mul(xe, sk, e) // xe = e*sk
+  sodium.crypto_core_ristretto255_scalar_sub(s, k, xe) // s = k - esk
+  return Buffer.concat([s, e]) // sig = (s,e)
 }
 
-exports.verify = function (message, signature, publicKey) {
-  return sodium.crypto_sign_verify_detached(signature, message, publicKey)
+exports.verify = function (m, sig, pk) {
+  if (typeof m === 'string') m = Buffer.from(m)
+  if (typeof sig === 'string') sig = Buffer.from(sig, 'hex')
+  if (typeof pk === 'string') pk = Buffer.from(pk, 'hex')
+  const s = sig.slice(0, sodium.crypto_core_ristretto255_SCALARBYTES)
+  const e = sig.slice(sodium.crypto_core_ristretto255_SCALARBYTES, 2 * sodium.crypto_core_ristretto255_SCALARBYTES)
+  const evBytes = Buffer.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+  const ev = Buffer.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+  const sg = Buffer.alloc(sodium.crypto_core_ristretto255_BYTES)
+  const epk = Buffer.alloc(sodium.crypto_core_ristretto255_BYTES)
+  const rv = Buffer.alloc(sodium.crypto_core_ristretto255_BYTES)
+  sodium.crypto_scalarmult_ristretto255_base(sg, s) // sg = s*g
+  sodium.crypto_scalarmult_ristretto255(epk, e, pk) // epk = e*pk
+  sodium.crypto_core_ristretto255_add(rv, sg, epk) // rv = sg + epk = (k - e sk)g + epk = k g - e pk + e pk = k g
+  sodium.crypto_generichash(evBytes, Buffer.concat([rv, m])) // e = hash(r|m)c
+  bytesToScalar(ev, evBytes)
+  return ev.equals(e)
 }
 
 exports.data = function (data) {
@@ -175,4 +204,8 @@ if (sodium.sodium_free) {
 
 function encodeUInt64 (n) {
   return uint64be.encode(n, Buffer.allocUnsafe(8))
+}
+
+function bytesToScalar (buf, bytes) {
+  sodium.crypto_core_ristretto255_scalar_mul(buf, one, bytes)
 }
