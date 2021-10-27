@@ -12,7 +12,16 @@ tape('key pair', function (t) {
   const keyPair = crypto.keyPair()
 
   t.same(keyPair.publicKey.length, 32)
-  t.same(keyPair.secretKey.length, 64)
+  t.same(keyPair.secretKey.length, 32)
+  t.end()
+})
+
+tape('validate key pair', function (t) {
+  const keyPair1 = crypto.keyPair()
+  const keyPair2 = crypto.keyPair()
+
+  t.false(crypto.validateKeyPair({ publicKey: keyPair1.publicKey, secretKey: keyPair2.secretKey }))
+  t.true(crypto.validateKeyPair({ publicKey: keyPair1.publicKey, secretKey: keyPair1.secretKey }))
   t.end()
 })
 
@@ -24,7 +33,9 @@ tape('sign', function (t) {
 
   t.same(sig.length, 64)
   t.ok(crypto.verify(message, sig, keyPair.publicKey))
-  t.notOk(crypto.verify(message, Buffer.alloc(64), keyPair.publicKey))
+
+  sig[0] = ~sig[0] // bad sig
+  t.notOk(crypto.verify(message, sig, keyPair.publicKey))
   t.end()
 })
 

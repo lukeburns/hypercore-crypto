@@ -118,6 +118,12 @@ exports.verify = function (m, sig, pk) {
   return ev.equals(e)
 }
 
+exports.validateKeyPair = function (keyPair) {
+  const pk = Buffer.allocUnsafe(sodium.crypto_core_ristretto255_BYTES)
+  sodium.crypto_scalarmult_ristretto255_base(pk, keyPair.secretKey)
+  return pk.equals(keyPair.publicKey)
+}
+
 exports.data = function (data) {
   const out = Buffer.allocUnsafe(32)
 
