@@ -70,10 +70,14 @@ exports.remoteCapability = function (key, split) {
   return out
 }
 
-exports.keyPair = function () {
-  const sk = Buffer.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+exports.keyPair = function (sk) {
+  if (sk) {
+    sk = Buffer.from(sk, 'hex')
+  } else {
+    sk = Buffer.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+    sodium.crypto_core_ristretto255_scalar_random(sk)
+  }
   const pk = Buffer.alloc(sodium.crypto_core_ristretto255_BYTES)
-  sodium.crypto_core_ristretto255_scalar_random(sk)
   sodium.crypto_scalarmult_ristretto255_base(pk, sk)
   return {
     publicKey: pk,
