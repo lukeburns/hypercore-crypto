@@ -9,12 +9,14 @@ const ROOT_TYPE = b4a.from([2])
 
 const HYPERCORE = b4a.from('hypercore')
 
-exports.keyPair = function (seed) {
-  const publicKey = b4a.allocUnsafe(sodium.crypto_sign_PUBLICKEYBYTES)
-  const secretKey = b4a.allocUnsafe(sodium.crypto_sign_SECRETKEYBYTES)
+exports.keyPair = function (secretKey) {
+  if (!secretKey) {
+    secretKey = b4a.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+    sodium.crypto_core_ristretto255_scalar_random(secretKey)
+  }
 
-  if (seed) sodium.crypto_sign_seed_keypair(publicKey, secretKey, seed)
-  else sodium.crypto_sign_keypair(publicKey, secretKey)
+  const publicKey = b4a.alloc(sodium.crypto_core_ristretto255_BYTES)
+  sodium.crypto_scalarmult_ristretto255_base(publicKey, secretKey)
 
   return {
     publicKey,
@@ -23,19 +25,46 @@ exports.keyPair = function (seed) {
 }
 
 exports.validateKeyPair = function (keyPair) {
-  const pk = b4a.allocUnsafe(sodium.crypto_sign_PUBLICKEYBYTES)
-  sodium.crypto_sign_ed25519_sk_to_pk(pk, keyPair.secretKey)
+  const pk = b4a.allocUnsafe(sodium.crypto_core_ristretto255_BYTES)
+  sodium.crypto_scalarmult_ristretto255_base(pk, keyPair.secretKey)
   return pk.equals(keyPair.publicKey)
 }
 
-exports.sign = function (message, secretKey) {
-  const signature = b4a.allocUnsafe(sodium.crypto_sign_BYTES)
-  sodium.crypto_sign_detached(signature, message, secretKey)
-  return signature
+exports.sign = function (m, sk) {
+  if (typeof m === 'string') m = b4a.from(m)
+  if (typeof sk === 'string') sk = b4a.from(sk, 'hex')
+  const k = b4a.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+  const eBytes = b4a.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+  const e = b4a.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+  const xe = b4a.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+  const s = b4a.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+  const r = b4a.alloc(sodium.crypto_core_ristretto255_BYTES)
+  sodium.crypto_core_ristretto255_scalar_random(k) // k
+  sodium.crypto_scalarmult_ristretto255_base(r, k) // r = k*g
+  sodium.crypto_generichash(eBytes, b4a.concat([r, m])) // e = hash(r|m)
+  bytesToScalar(e, eBytes)
+  sodium.crypto_core_ristretto255_scalar_mul(xe, sk, e) // xe = e*sk
+  sodium.crypto_core_ristretto255_scalar_sub(s, k, xe) // s = k - esk
+  return b4a.concat([s, e]) // sig = (s,e)
 }
 
-exports.verify = function (message, signature, publicKey) {
-  return sodium.crypto_sign_verify_detached(signature, message, publicKey)
+exports.verify = function (m, sig, pk) {
+  if (typeof m === 'string') m = b4a.from(m)
+  if (typeof sig === 'string') sig = b4a.from(sig, 'hex')
+  if (typeof pk === 'string') pk = b4a.from(pk, 'hex')
+  const s = sig.slice(0, sodium.crypto_core_ristretto255_SCALARBYTES)
+  const e = sig.slice(sodium.crypto_core_ristretto255_SCALARBYTES, 2 * sodium.crypto_core_ristretto255_SCALARBYTES)
+  const evBytes = b4a.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+  const ev = b4a.alloc(sodium.crypto_core_ristretto255_SCALARBYTES)
+  const sg = b4a.alloc(sodium.crypto_core_ristretto255_BYTES)
+  const epk = b4a.alloc(sodium.crypto_core_ristretto255_BYTES)
+  const rv = b4a.alloc(sodium.crypto_core_ristretto255_BYTES)
+  sodium.crypto_scalarmult_ristretto255_base(sg, s) // sg = s*g
+  sodium.crypto_scalarmult_ristretto255(epk, e, pk) // epk = e*pk
+  sodium.crypto_core_ristretto255_add(rv, sg, epk) // rv = sg + epk = (k - e sk)g + epk = k g - e pk + e pk = k g
+  sodium.crypto_generichash(evBytes, b4a.concat([rv, m])) // e = hash(r|m)c
+  bytesToScalar(ev, evBytes)
+  return ev.equals(e)
 }
 
 exports.data = function (data) {
@@ -105,4 +134,8 @@ if (sodium.sodium_free) {
   }
 } else {
   exports.free = function () {}
+}
+
+function bytesToScalar (buf, bytes) {
+  sodium.crypto_core_ristretto255_scalar_mul(buf, one, bytes)
 }
