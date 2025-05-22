@@ -38,6 +38,8 @@ exports.sign = function (message, secretKey) {
 }
 
 exports.verify = function (message, signature, publicKey) {
+  if (signature.byteLength !== sodium.crypto_sign_BYTES) return false
+  if (publicKey.byteLength !== sodium.crypto_sign_PUBLICKEYBYTES) return false
   return sodium.crypto_sign_verify_detached(signature, message, publicKey)
 }
 
@@ -139,10 +141,11 @@ exports.randomBytes = function (n) {
   return buf
 }
 
-exports.discoveryKey = function (publicKey) {
+exports.discoveryKey = function (key) {
+  if (!key || key.byteLength !== 32) throw new Error('Must pass a 32 byte buffer')
   // Discovery keys might stay around for a while, so better not to use slab memory (for better gc)
   const digest = b4a.allocUnsafeSlow(32)
-  sodium.crypto_generichash(digest, HYPERCORE, publicKey)
+  sodium.crypto_generichash(digest, HYPERCORE, key)
   return digest
 }
 
