@@ -1,6 +1,6 @@
 const { ristretto255, ristretto255_hasher } = require('@noble/curves/ed25519.js')
-const { sha256 } = require('@noble/hashes/sha2.js')
-const { randomBytes: nobleRandomBytes } = require('@noble/hashes/utils.js')
+const { blake2b } = require('@noble/hashes/blake2b')
+const { randomBytes: nobleRandomBytes } = require('@noble/hashes/utils')
 const c = require('compact-encoding')
 const b4a = require('b4a')
 
@@ -12,46 +12,47 @@ const ROOT_TYPE = b4a.from([2])
 const HYPERCORE = b4a.from('hypercore')
 
 exports.keyPair = function (seed) {
-  // key pairs might stay around for a while, so better not to use a default slab to avoid retaining it completely
-  const slab = b4a.allocUnsafeSlow(32 + 64) // 32 bytes for public key, 64 bytes for secret key
-  const publicKey = slab.subarray(0, 32)
-  const secretKey = slab.subarray(32)
+  let privateKey
 
-  let privateKeyScalar
   if (seed) {
     // Use seed to generate deterministic private key
-    privateKeyScalar = ristretto255_hasher.hashToScalar(seed)
+    const scalar = ristretto255_hasher.hashToScalar(seed)
+    privateKey = b4a.from(ristretto255.Point.Fn.toBytes(scalar))
   } else {
     // Generate random private key using ristretto255 scalar generation
-    privateKeyScalar = ristretto255_hasher.hashToScalar(nobleRandomBytes(32))
+    const scalar = ristretto255_hasher.hashToScalar(nobleRandomBytes(32))
+    privateKey = b4a.from(ristretto255.Point.Fn.toBytes(scalar))
   }
 
   // Derive public key using ristretto255
+  const privateKeyScalar = ristretto255.Point.Fn.fromBytes(privateKey)
   const publicKeyPoint = ristretto255.Point.BASE.multiply(privateKeyScalar)
-  
-  // Write private key to first 32 bytes of secret key
-  const privateKeyBytes = ristretto255.Point.Fn.toBytes(privateKeyScalar)
-  secretKey.set(privateKeyBytes, 0, 32)
-  
-  // Write public key to both publicKey buffer and last 32 bytes of secret key
-  const publicKeyBytes = publicKeyPoint.toBytes()
-  publicKey.set(publicKeyBytes)
-  secretKey.set(publicKeyBytes, 32, 32)
+  const publicKey = b4a.from(publicKeyPoint.toBytes())
+
+  // key pairs might stay around for a while, so better not to use a default slab to avoid retaining it completely
+  const slab = b4a.allocUnsafeSlow(32 + 64) // 32 bytes for public key, 64 bytes for secret key
+  const publicKeyBuffer = slab.subarray(0, 32)
+  const secretKeyBuffer = slab.subarray(32)
+
+  publicKeyBuffer.set(publicKey)
+  // For compatibility with sodium format, we need to create a 64-byte secret key
+  // The first 32 bytes are the private key, the last 32 bytes are the public key
+  secretKeyBuffer.set(privateKey, 0, 32)
+  secretKeyBuffer.set(publicKey, 32, 32)
 
   return {
-    publicKey,
-    secretKey
+    publicKey: publicKeyBuffer,
+    secretKey: secretKeyBuffer
   }
 }
 
 exports.validateKeyPair = function (keyPair) {
   try {
-    const pk = b4a.allocUnsafe(32)
     // Extract the private key from the first 32 bytes of the secret key
     const privateKey = keyPair.secretKey.subarray(0, 32)
     const privateKeyScalar = ristretto255.Point.Fn.fromBytes(privateKey)
     const publicKeyPoint = ristretto255.Point.BASE.multiply(privateKeyScalar)
-    pk.set(publicKeyPoint.toBytes())
+    const pk = b4a.from(publicKeyPoint.toBytes())
     return b4a.equals(pk, keyPair.publicKey)
   } catch (e) {
     return false
@@ -79,7 +80,7 @@ exports.sign = function (message, secretKey) {
   const publicKeyPoint = ristretto255.Point.BASE.multiply(privateKeyScalar)
   const publicKey = b4a.from(publicKeyPoint.toBytes())
   
-  const challenge = sha256.create()
+  const challenge = blake2b.create({ dkLen: 32 })
   challenge.update(R_bytes)
   challenge.update(publicKey)
   challenge.update(message)
@@ -111,7 +112,7 @@ exports.verify = function (message, signature, publicKey) {
     const s = ristretto255.Point.Fn.fromBytes(s_bytes)
 
     // Compute challenge c = H(R || P || message)
-    const challenge = sha256.create()
+    const challenge = blake2b.create({ dkLen: 32 })
     challenge.update(R_bytes)
     challenge.update(publicKey)
     challenge.update(message)
@@ -212,7 +213,7 @@ exports.encryptionKeyPair = function (seed) {
 exports.data = function (data) {
   const out = b4a.allocUnsafe(32)
 
-  const hash = sha256.create()
+  const hash = blake2b.create({ dkLen: 32 })
   hash.update(LEAF_TYPE)
   hash.update(c.encode(c.uint64, data.byteLength))
   hash.update(data)
@@ -231,7 +232,7 @@ exports.parent = function (a, b) {
 
   const out = b4a.allocUnsafe(32)
 
-  const hash = sha256.create()
+  const hash = blake2b.create({ dkLen: 32 })
   hash.update(PARENT_TYPE)
   hash.update(c.encode(c.uint64, a.size + b.size))
   hash.update(a.hash)
@@ -245,7 +246,7 @@ exports.parent = function (a, b) {
 exports.tree = function (roots, out) {
   if (!out) out = b4a.allocUnsafe(32)
 
-  const hash = sha256.create()
+  const hash = blake2b.create({ dkLen: 32 })
   hash.update(ROOT_TYPE)
 
   for (let i = 0; i < roots.length; i++) {
@@ -264,7 +265,7 @@ exports.hash = function (data, out) {
   if (!out) out = b4a.allocUnsafe(32)
   if (!Array.isArray(data)) data = [data]
 
-  const hash = sha256.create()
+  const hash = blake2b.create({ dkLen: 32 })
   for (const chunk of data) {
     hash.update(chunk)
   }
@@ -283,7 +284,7 @@ exports.discoveryKey = function (key) {
   // Discovery keys might stay around for a while, so better not to use slab memory (for better gc)
   const digest = b4a.allocUnsafeSlow(32)
 
-  const hash = sha256.create()
+  const hash = blake2b.create({ dkLen: 32 })
   hash.update(HYPERCORE)
   hash.update(key)
   const result = hash.digest()
@@ -307,7 +308,7 @@ exports.namespace = function (name, count) {
   const ns = b4a.allocUnsafe(33)
 
   // Hash the name to get the base namespace
-  const nameHash = sha256.create()
+  const nameHash = blake2b.create({ dkLen: 32 })
   nameHash.update(typeof name === 'string' ? b4a.from(name) : name)
   const nameDigest = nameHash.digest()
   ns.set(nameDigest, 0, 32)
@@ -316,7 +317,7 @@ exports.namespace = function (name, count) {
     list[i] = buf.subarray(32 * i, 32 * i + 32)
     ns[32] = ids[i]
 
-    const itemHash = sha256.create()
+    const itemHash = blake2b.create({ dkLen: 32 })
     itemHash.update(ns)
     const itemDigest = itemHash.digest()
     list[i].set(itemDigest)
