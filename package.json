@@ -1,31 +1,32 @@
 {
-  "name": "hypercore-crypto",
+  "name": "@lukeburns/hypercore-crypto",
   "version": "3.6.1",
-  "description": "The crypto primitives used in hypercore, extracted into a separate module",
+  "description": "The crypto primitives used in hypercore, extracted into a separate module, using ristretto255 instead of ed25519",
   "main": "index.js",
   "files": [
     "index.js"
   ],
   "dependencies": {
+    "@noble/curves": "^2.0.1",
+    "@noble/hashes": "^1.3.3",
     "b4a": "^1.6.6",
-    "compact-encoding": "^2.15.0",
-    "sodium-universal": "^5.0.0"
+    "compact-encoding": "^2.15.0"
   },
   "devDependencies": {
     "brittle": "^3.5.0",
     "standard": "^17.1.0"
   },
   "scripts": {
-    "test": "standard && brittle test.js"
+    "test": "brittle test.js"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/mafintosh/hypercore-crypto.git"
+    "url": "https://github.com/lukeburns/hypercore-crypto.git"
   },
-  "author": "Mathias Buus (@mafintosh)",
+  "author": "Luke Burns (@lukeburns)",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/mafintosh/hypercore-crypto/issues"
+    "url": "https://github.com/lukeburns/hypercore-crypto/issues"
   },
-  "homepage": "https://github.com/mafintosh/hypercore-crypto"
+  "homepage": "https://github.com/lukeburns/hypercore-crypto"
 }

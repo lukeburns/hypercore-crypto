@@ -1,4 +1,6 @@
-const sodium = require('sodium-universal')
+const { ristretto255, ristretto255_hasher } = require('@noble/curves/ed25519.js')
+const { sha256 } = require('@noble/hashes/sha2.js')
+const { randomBytes: nobleRandomBytes } = require('@noble/hashes/utils.js')
 const c = require('compact-encoding')
 const b4a = require('b4a')
 
@@ -10,82 +12,210 @@ const ROOT_TYPE = b4a.from([2])
 const HYPERCORE = b4a.from('hypercore')
 
 exports.keyPair = function (seed) {
-  // key pairs might stay around for a while, so better not to use a default slab to avoid retaining it completely
-  const slab = b4a.allocUnsafeSlow(sodium.crypto_sign_PUBLICKEYBYTES + sodium.crypto_sign_SECRETKEYBYTES)
-  const publicKey = slab.subarray(0, sodium.crypto_sign_PUBLICKEYBYTES)
-  const secretKey = slab.subarray(sodium.crypto_sign_PUBLICKEYBYTES)
+  let privateKey
 
-  if (seed) sodium.crypto_sign_seed_keypair(publicKey, secretKey, seed)
-  else sodium.crypto_sign_keypair(publicKey, secretKey)
+  if (seed) {
+    // Use seed to generate deterministic private key
+    const scalar = ristretto255_hasher.hashToScalar(seed)
+    privateKey = b4a.from(ristretto255.Point.Fn.toBytes(scalar))
+  } else {
+    // Generate random private key using ristretto255 scalar generation
+    const scalar = ristretto255_hasher.hashToScalar(nobleRandomBytes(32))
+    privateKey = b4a.from(ristretto255.Point.Fn.toBytes(scalar))
+  }
+
+  // Derive public key using ristretto255
+  const privateKeyScalar = ristretto255.Point.Fn.fromBytes(privateKey)
+  const publicKeyPoint = ristretto255.Point.BASE.multiply(privateKeyScalar)
+  const publicKey = b4a.from(publicKeyPoint.toBytes())
+
+  // key pairs might stay around for a while, so better not to use a default slab to avoid retaining it completely
+  const slab = b4a.allocUnsafeSlow(32 + 64) // 32 bytes for public key, 64 bytes for secret key
+  const publicKeyBuffer = slab.subarray(0, 32)
+  const secretKeyBuffer = slab.subarray(32)
+
+  publicKeyBuffer.set(publicKey)
+  // For compatibility with sodium format, we need to create a 64-byte secret key
+  // The first 32 bytes are the private key, the last 32 bytes are the public key
+  secretKeyBuffer.set(privateKey, 0, 32)
+  secretKeyBuffer.set(publicKey, 32, 32)
 
   return {
-    publicKey,
-    secretKey
+    publicKey: publicKeyBuffer,
+    secretKey: secretKeyBuffer
   }
 }
 
 exports.validateKeyPair = function (keyPair) {
-  const pk = b4a.allocUnsafe(sodium.crypto_sign_PUBLICKEYBYTES)
-  sodium.crypto_sign_ed25519_sk_to_pk(pk, keyPair.secretKey)
-  return b4a.equals(pk, keyPair.publicKey)
+  try {
+    // Extract the private key from the first 32 bytes of the secret key
+    const privateKey = keyPair.secretKey.subarray(0, 32)
+    const privateKeyScalar = ristretto255.Point.Fn.fromBytes(privateKey)
+    const publicKeyPoint = ristretto255.Point.BASE.multiply(privateKeyScalar)
+    const pk = b4a.from(publicKeyPoint.toBytes())
+    return b4a.equals(pk, keyPair.publicKey)
+  } catch (e) {
+    return false
+  }
 }
 
 exports.sign = function (message, secretKey) {
   // Dedicated slab for the signature, to avoid retaining unneeded mem and for security
-  const signature = b4a.allocUnsafeSlow(sodium.crypto_sign_BYTES)
-  sodium.crypto_sign_detached(signature, message, secretKey)
+  const signature = b4a.allocUnsafeSlow(64) // Schnorr signature is 64 bytes (32 + 32)
+
+  // Extract the private key from the first 32 bytes of the secret key
+  const privateKey = secretKey.subarray(0, 32)
+
+  // Generate random nonce using ristretto255 scalar generation
+  const nonceScalar = ristretto255_hasher.hashToScalar(nobleRandomBytes(32))
+  const nonce = b4a.from(ristretto255.Point.Fn.toBytes(nonceScalar))
+
+  // Compute R = nonce * G
+  const R = ristretto255.Point.BASE.multiply(nonceScalar)
+  const R_bytes = b4a.from(R.toBytes())
+
+  // Compute challenge c = H(R || P || message)
+  const publicKey = secretKey.subarray(32, 64)
+  const challenge = sha256.create()
+  challenge.update(R_bytes)
+  challenge.update(publicKey)
+  challenge.update(message)
+  const c = challenge.digest()
+
+  // Compute s = nonce + c * privateKey
+  const c_scalar = ristretto255_hasher.hashToScalar(c)
+  const privateKey_scalar = ristretto255.Point.Fn.fromBytes(privateKey)
+  const s = ristretto255.Point.Fn.add(nonceScalar, ristretto255.Point.Fn.mul(c_scalar, privateKey_scalar))
+
+  // Signature is (R, s)
+  signature.set(R_bytes, 0, 32)
+  signature.set(b4a.from(ristretto255.Point.Fn.toBytes(s)), 32, 32)
+
   return signature
 }
 
 exports.verify = function (message, signature, publicKey) {
-  if (signature.byteLength !== sodium.crypto_sign_BYTES) return false
-  if (publicKey.byteLength !== sodium.crypto_sign_PUBLICKEYBYTES) return false
-  return sodium.crypto_sign_verify_detached(signature, message, publicKey)
+  if (signature.byteLength !== 64) return false
+  if (publicKey.byteLength !== 32) return false
+  try {
+    // Extract R and s from signature
+    const R_bytes = signature.subarray(0, 32)
+    const s_bytes = signature.subarray(32, 64)
+
+    // Parse points and scalars
+    const R = ristretto255.Point.fromBytes(R_bytes)
+    const P = ristretto255.Point.fromBytes(publicKey)
+    const s = ristretto255.Point.Fn.fromBytes(s_bytes)
+
+    // Compute challenge c = H(R || P || message)
+    const challenge = sha256.create()
+    challenge.update(R_bytes)
+    challenge.update(publicKey)
+    challenge.update(message)
+    const c = challenge.digest()
+    const c_scalar = ristretto255_hasher.hashToScalar(c)
+
+    // Verify: s * G = R + c * P
+    const sG = ristretto255.Point.BASE.multiply(s)
+    const cP = P.multiply(c_scalar)
+    const R_plus_cP = R.add(cP)
+
+    return sG.equals(R_plus_cP)
+  } catch (e) {
+    return false
+  }
 }
 
 exports.encrypt = function (message, publicKey) {
-  const ciphertext = b4a.alloc(message.byteLength + sodium.crypto_box_SEALBYTES)
-  sodium.crypto_box_seal(ciphertext, message, publicKey)
-  return ciphertext
+  // For ristretto255, we'll use a simple ECIES-like encryption
+  // Generate ephemeral key pair
+  const ephemeralScalar = ristretto255_hasher.hashToScalar(nobleRandomBytes(32))
+  const ephemeralPrivateKey = b4a.from(ristretto255.Point.Fn.toBytes(ephemeralScalar))
+  const ephemeralPrivateKeyScalar = ristretto255.Point.Fn.fromBytes(ephemeralPrivateKey)
+  const ephemeralPublicKeyPoint = ristretto255.Point.BASE.multiply(ephemeralPrivateKeyScalar)
+  const ephemeralPublicKey = b4a.from(ephemeralPublicKeyPoint.toBytes())
+
+  // Derive shared secret using ECDH
+  const publicKeyPoint = ristretto255.Point.fromBytes(publicKey)
+  const sharedSecretPoint = publicKeyPoint.multiply(ephemeralPrivateKeyScalar)
+  const sharedSecret = b4a.from(sharedSecretPoint.toBytes())
+
+  // Use first 32 bytes of shared secret as key for simple XOR encryption
+  const key = sharedSecret.subarray(0, 32)
+
+  // Encrypt message with XOR
+  const encrypted = b4a.alloc(message.length)
+  for (let i = 0; i < message.length; i++) {
+    encrypted[i] = message[i] ^ key[i % 32]
+  }
+
+  // Return ephemeral public key + encrypted message
+  return b4a.concat([ephemeralPublicKey, encrypted])
 }
 
 exports.decrypt = function (ciphertext, keyPair) {
-  if (ciphertext.byteLength < sodium.crypto_box_SEALBYTES) return null
+  if (ciphertext.byteLength < 32) return null // Need at least ephemeral public key
 
-  const plaintext = b4a.alloc(ciphertext.byteLength - sodium.crypto_box_SEALBYTES)
+  const ephemeralPublicKey = ciphertext.subarray(0, 32)
+  const encrypted = ciphertext.subarray(32)
 
-  if (!sodium.crypto_box_seal_open(plaintext, ciphertext, keyPair.publicKey, keyPair.secretKey)) {
+  try {
+    // Derive shared secret using ECDH
+    const ephemeralPublicKeyPoint = ristretto255.Point.fromBytes(ephemeralPublicKey)
+    const privateKey = keyPair.secretKey.subarray(0, 32)
+    const privateKeyScalar = ristretto255.Point.Fn.fromBytes(privateKey)
+    const sharedSecretPoint = ephemeralPublicKeyPoint.multiply(privateKeyScalar)
+    const sharedSecret = b4a.from(sharedSecretPoint.toBytes())
+
+    // Use first 32 bytes of shared secret as key for decryption
+    const key = sharedSecret.subarray(0, 32)
+
+    // Decrypt message with XOR
+    const plaintext = b4a.alloc(encrypted.length)
+    for (let i = 0; i < encrypted.length; i++) {
+      plaintext[i] = encrypted[i] ^ key[i % 32]
+    }
+
+    return plaintext
+  } catch (e) {
     return null
   }
-
-  return plaintext
 }
 
 exports.encryptionKeyPair = function (seed) {
-  const publicKey = b4a.alloc(sodium.crypto_box_PUBLICKEYBYTES)
-  const secretKey = b4a.alloc(sodium.crypto_box_SECRETKEYBYTES)
+  let privateKey
 
   if (seed) {
-    sodium.crypto_box_seed_keypair(publicKey, secretKey, seed)
+    // Use seed to generate deterministic private key
+    const scalar = ristretto255_hasher.hashToScalar(seed)
+    privateKey = b4a.from(ristretto255.Point.Fn.toBytes(scalar))
   } else {
-    sodium.crypto_box_keypair(publicKey, secretKey)
+    // Generate random private key using ristretto255 scalar generation
+    const scalar = ristretto255_hasher.hashToScalar(nobleRandomBytes(32))
+    privateKey = b4a.from(ristretto255.Point.Fn.toBytes(scalar))
   }
+
+  // Derive public key using ristretto255
+  const privateKeyScalar = ristretto255.Point.Fn.fromBytes(privateKey)
+  const publicKeyPoint = ristretto255.Point.BASE.multiply(privateKeyScalar)
+  const publicKey = b4a.from(publicKeyPoint.toBytes())
 
   return {
     publicKey,
-    secretKey
+    secretKey: privateKey
   }
 }
 
 exports.data = function (data) {
   const out = b4a.allocUnsafe(32)
 
-  sodium.crypto_generichash_batch(out, [
-    LEAF_TYPE,
-    c.encode(c.uint64, data.byteLength),
-    data
-  ])
+  const hash = sha256.create()
+  hash.update(LEAF_TYPE)
+  hash.update(c.encode(c.uint64, data.byteLength))
+  hash.update(data)
 
+  const digest = hash.digest()
+  out.set(digest)
   return out
 }
 
@@ -98,31 +228,32 @@ exports.parent = function (a, b) {
 
   const out = b4a.allocUnsafe(32)
 
-  sodium.crypto_generichash_batch(out, [
-    PARENT_TYPE,
-    c.encode(c.uint64, a.size + b.size),
-    a.hash,
-    b.hash
-  ])
+  const hash = sha256.create()
+  hash.update(PARENT_TYPE)
+  hash.update(c.encode(c.uint64, a.size + b.size))
+  hash.update(a.hash)
+  hash.update(b.hash)
 
+  const digest = hash.digest()
+  out.set(digest)
   return out
 }
 
 exports.tree = function (roots, out) {
-  const buffers = new Array(3 * roots.length + 1)
-  let j = 0
+  if (!out) out = b4a.allocUnsafe(32)
 
-  buffers[j++] = ROOT_TYPE
+  const hash = sha256.create()
+  hash.update(ROOT_TYPE)
 
   for (let i = 0; i < roots.length; i++) {
     const r = roots[i]
-    buffers[j++] = r.hash
-    buffers[j++] = c.encode(c.uint64, r.index)
-    buffers[j++] = c.encode(c.uint64, r.size)
+    hash.update(r.hash)
+    hash.update(c.encode(c.uint64, r.index))
+    hash.update(c.encode(c.uint64, r.size))
   }
 
-  if (!out) out = b4a.allocUnsafe(32)
-  sodium.crypto_generichash_batch(out, buffers)
+  const digest = hash.digest()
+  out.set(digest)
   return out
 }
 
@@ -130,31 +261,35 @@ exports.hash = function (data, out) {
   if (!out) out = b4a.allocUnsafe(32)
   if (!Array.isArray(data)) data = [data]
 
-  sodium.crypto_generichash_batch(out, data)
+  const hash = sha256.create()
+  for (const chunk of data) {
+    hash.update(chunk)
+  }
 
+  const digest = hash.digest()
+  out.set(digest)
   return out
 }
 
 exports.randomBytes = function (n) {
-  const buf = b4a.allocUnsafe(n)
-  sodium.randombytes_buf(buf)
-  return buf
+  return b4a.from(nobleRandomBytes(n))
 }
 
 exports.discoveryKey = function (key) {
   if (!key || key.byteLength !== 32) throw new Error('Must pass a 32 byte buffer')
   // Discovery keys might stay around for a while, so better not to use slab memory (for better gc)
   const digest = b4a.allocUnsafeSlow(32)
-  sodium.crypto_generichash(digest, HYPERCORE, key)
+
+  const hash = sha256.create()
+  hash.update(HYPERCORE)
+  hash.update(key)
+  const result = hash.digest()
+  digest.set(result)
   return digest
 }
 
-if (sodium.sodium_free) {
-  exports.free = function (secureBuf) {
-    if (secureBuf.secure) sodium.sodium_free(secureBuf)
-  }
-} else {
-  exports.free = function () {}
+exports.free = function () {
+  // No-op for @noble/curves as it doesn't use secure memory
 }
 
 exports.namespace = function (name, count) {
@@ -167,12 +302,21 @@ exports.namespace = function (name, count) {
 
   // ns is ephemeral, so default slab
   const ns = b4a.allocUnsafe(33)
-  sodium.crypto_generichash(ns.subarray(0, 32), typeof name === 'string' ? b4a.from(name) : name)
+
+  // Hash the name to get the base namespace
+  const nameHash = sha256.create()
+  nameHash.update(typeof name === 'string' ? b4a.from(name) : name)
+  const nameDigest = nameHash.digest()
+  ns.set(nameDigest, 0, 32)
 
   for (let i = 0; i < list.length; i++) {
     list[i] = buf.subarray(32 * i, 32 * i + 32)
     ns[32] = ids[i]
-    sodium.crypto_generichash(list[i], ns)
+
+    const itemHash = sha256.create()
+    itemHash.update(ns)
+    const itemDigest = itemHash.digest()
+    list[i].set(itemDigest)
   }
 
   return list
