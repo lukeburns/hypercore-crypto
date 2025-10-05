@@ -12,44 +12,46 @@ const ROOT_TYPE = b4a.from([2])
 const HYPERCORE = b4a.from('hypercore')
 
 exports.keyPair = function (seed) {
-  let privateKey
+  // key pairs might stay around for a while, so better not to use a default slab to avoid retaining it completely
+  const slab = b4a.allocUnsafeSlow(32 + 64) // 32 bytes for public key, 64 bytes for secret key
+  const publicKey = slab.subarray(0, 32)
+  const secretKey = slab.subarray(32)
 
+  let privateKeyScalar
   if (seed) {
     // Use seed to generate deterministic private key
-    const scalar = ristretto255_hasher.hashToScalar(seed)
-    privateKey = b4a.from(ristretto255.Point.Fn.toBytes(scalar))
+    privateKeyScalar = ristretto255_hasher.hashToScalar(seed)
   } else {
     // Generate random private key using ristretto255 scalar generation
-    const scalar = ristretto255_hasher.hashToScalar(nobleRandomBytes(32))
-    privateKey = b4a.from(ristretto255.Point.Fn.toBytes(scalar))
+    privateKeyScalar = ristretto255_hasher.hashToScalar(nobleRandomBytes(32))
   }
 
   // Derive public key using ristretto255
-  const privateKeyScalar = ristretto255.Point.Fn.fromBytes(privateKey)
   const publicKeyPoint = ristretto255.Point.BASE.multiply(privateKeyScalar)
-  const publicKey = b4a.from(publicKeyPoint.toBytes())
-
-  // key pairs might stay around for a while, so better not to use a default slab to avoid retaining it completely
-  const slab = b4a.allocUnsafeSlow(32 + 32) // 32 bytes for public key, 32 bytes for secret key
-  const publicKeyBuffer = slab.subarray(0, 32)
-  const secretKeyBuffer = slab.subarray(32)
-
-  publicKeyBuffer.set(publicKey)
-  // Export only the private key (32 bytes) to match original API
-  secretKeyBuffer.set(privateKey)
+  
+  // Write private key to first 32 bytes of secret key
+  const privateKeyBytes = ristretto255.Point.Fn.toBytes(privateKeyScalar)
+  secretKey.set(privateKeyBytes, 0, 32)
+  
+  // Write public key to both publicKey buffer and last 32 bytes of secret key
+  const publicKeyBytes = publicKeyPoint.toBytes()
+  publicKey.set(publicKeyBytes)
+  secretKey.set(publicKeyBytes, 32, 32)
 
   return {
-    publicKey: publicKeyBuffer,
-    secretKey: secretKeyBuffer
+    publicKey,
+    secretKey
   }
 }
 
 exports.validateKeyPair = function (keyPair) {
   try {
-    // The secret key is now just the private key (32 bytes)
-    const privateKeyScalar = ristretto255.Point.Fn.fromBytes(keyPair.secretKey)
+    const pk = b4a.allocUnsafe(32)
+    // Extract the private key from the first 32 bytes of the secret key
+    const privateKey = keyPair.secretKey.subarray(0, 32)
+    const privateKeyScalar = ristretto255.Point.Fn.fromBytes(privateKey)
     const publicKeyPoint = ristretto255.Point.BASE.multiply(privateKeyScalar)
-    const pk = b4a.from(publicKeyPoint.toBytes())
+    pk.set(publicKeyPoint.toBytes())
     return b4a.equals(pk, keyPair.publicKey)
   } catch (e) {
     return false
@@ -60,8 +62,8 @@ exports.sign = function (message, secretKey) {
   // Dedicated slab for the signature, to avoid retaining unneeded mem and for security
   const signature = b4a.allocUnsafeSlow(64) // Schnorr signature is 64 bytes (32 + 32)
 
-  // The secret key is now just the private key (32 bytes)
-  const privateKey = secretKey
+  // Extract the private key from the first 32 bytes of the secret key
+  const privateKey = secretKey.subarray(0, 32)
 
   // Generate random nonce using ristretto255 scalar generation
   const nonceScalar = ristretto255_hasher.hashToScalar(nobleRandomBytes(32))
