@@ -12,8 +12,8 @@ test('key pair', function (t) {
   const keyPair = crypto.keyPair()
 
   t.is(keyPair.publicKey.length, 32)
-  t.is(keyPair.secretKey.length, 64)
-  t.is(keyPair.publicKey.buffer.byteLength, 96, 'small slab')
+  t.is(keyPair.secretKey.length, 32)
+  t.is(keyPair.publicKey.buffer.byteLength, 64, 'small slab')
   t.is(keyPair.publicKey.buffer, keyPair.secretKey.buffer, 'public and seret key share the same slab')
 })
 

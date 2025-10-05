@@ -30,15 +30,13 @@ exports.keyPair = function (seed) {
   const publicKey = b4a.from(publicKeyPoint.toBytes())
 
   // key pairs might stay around for a while, so better not to use a default slab to avoid retaining it completely
-  const slab = b4a.allocUnsafeSlow(32 + 64) // 32 bytes for public key, 64 bytes for secret key
+  const slab = b4a.allocUnsafeSlow(32 + 32) // 32 bytes for public key, 32 bytes for secret key
   const publicKeyBuffer = slab.subarray(0, 32)
   const secretKeyBuffer = slab.subarray(32)
 
   publicKeyBuffer.set(publicKey)
-  // For compatibility with sodium format, we need to create a 64-byte secret key
-  // The first 32 bytes are the private key, the last 32 bytes are the public key
-  secretKeyBuffer.set(privateKey, 0, 32)
-  secretKeyBuffer.set(publicKey, 32, 32)
+  // Export only the private key (32 bytes) to match original API
+  secretKeyBuffer.set(privateKey)
 
   return {
     publicKey: publicKeyBuffer,
@@ -48,9 +46,8 @@ exports.keyPair = function (seed) {
 
 exports.validateKeyPair = function (keyPair) {
   try {
-    // Extract the private key from the first 32 bytes of the secret key
-    const privateKey = keyPair.secretKey.subarray(0, 32)
-    const privateKeyScalar = ristretto255.Point.Fn.fromBytes(privateKey)
+    // The secret key is now just the private key (32 bytes)
+    const privateKeyScalar = ristretto255.Point.Fn.fromBytes(keyPair.secretKey)
     const publicKeyPoint = ristretto255.Point.BASE.multiply(privateKeyScalar)
     const pk = b4a.from(publicKeyPoint.toBytes())
     return b4a.equals(pk, keyPair.publicKey)
@@ -63,8 +60,8 @@ exports.sign = function (message, secretKey) {
   // Dedicated slab for the signature, to avoid retaining unneeded mem and for security
   const signature = b4a.allocUnsafeSlow(64) // Schnorr signature is 64 bytes (32 + 32)
 
-  // Extract the private key from the first 32 bytes of the secret key
-  const privateKey = secretKey.subarray(0, 32)
+  // The secret key is now just the private key (32 bytes)
+  const privateKey = secretKey
 
   // Generate random nonce using ristretto255 scalar generation
   const nonceScalar = ristretto255_hasher.hashToScalar(nobleRandomBytes(32))
@@ -75,7 +72,11 @@ exports.sign = function (message, secretKey) {
   const R_bytes = b4a.from(R.toBytes())
 
   // Compute challenge c = H(R || P || message)
-  const publicKey = secretKey.subarray(32, 64)
+  // Derive public key from private key
+  const privateKeyScalar = ristretto255.Point.Fn.fromBytes(privateKey)
+  const publicKeyPoint = ristretto255.Point.BASE.multiply(privateKeyScalar)
+  const publicKey = b4a.from(publicKeyPoint.toBytes())
+  
   const challenge = sha256.create()
   challenge.update(R_bytes)
   challenge.update(publicKey)
