@@ -1,6 +1,6 @@
 {
   "name": "@lukeburns/hypercore-crypto",
-  "version": "3.6.1",
+  "version": "3.6.2",
   "description": "The crypto primitives used in hypercore, extracted into a separate module, using ristretto255 instead of ed25519",
   "main": "index.js",
   "files": [
