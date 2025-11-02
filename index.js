@@ -1,3 +1,4 @@
+const red25519 = require('red25519')
 const sodium = require('sodium-universal')
 const c = require('compact-encoding')
 const b4a = require('b4a')
@@ -9,39 +10,13 @@ const ROOT_TYPE = b4a.from([2])
 
 const HYPERCORE = b4a.from('hypercore')
 
-exports.keyPair = function (seed) {
-  // key pairs might stay around for a while, so better not to use a default slab to avoid retaining it completely
-  const slab = b4a.allocUnsafeSlow(sodium.crypto_sign_PUBLICKEYBYTES + sodium.crypto_sign_SECRETKEYBYTES)
-  const publicKey = slab.subarray(0, sodium.crypto_sign_PUBLICKEYBYTES)
-  const secretKey = slab.subarray(sodium.crypto_sign_PUBLICKEYBYTES)
+exports.keyPair = red25519.keyPair
 
-  if (seed) sodium.crypto_sign_seed_keypair(publicKey, secretKey, seed)
-  else sodium.crypto_sign_keypair(publicKey, secretKey)
+exports.validateKeyPair = red25519.validateKeyPair
 
-  return {
-    publicKey,
-    secretKey
-  }
-}
+exports.sign = red25519.sign
 
-exports.validateKeyPair = function (keyPair) {
-  const pk = b4a.allocUnsafe(sodium.crypto_sign_PUBLICKEYBYTES)
-  sodium.crypto_sign_ed25519_sk_to_pk(pk, keyPair.secretKey)
-  return b4a.equals(pk, keyPair.publicKey)
-}
-
-exports.sign = function (message, secretKey) {
-  // Dedicated slab for the signature, to avoid retaining unneeded mem and for security
-  const signature = b4a.allocUnsafeSlow(sodium.crypto_sign_BYTES)
-  sodium.crypto_sign_detached(signature, message, secretKey)
-  return signature
-}
-
-exports.verify = function (message, signature, publicKey) {
-  if (signature.byteLength !== sodium.crypto_sign_BYTES) return false
-  if (publicKey.byteLength !== sodium.crypto_sign_PUBLICKEYBYTES) return false
-  return sodium.crypto_sign_verify_detached(signature, message, publicKey)
-}
+exports.verify = red25519.verify
 
 exports.encrypt = function (message, publicKey) {
   const ciphertext = b4a.alloc(message.byteLength + sodium.crypto_box_SEALBYTES)
