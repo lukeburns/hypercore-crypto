@@ -18,6 +18,14 @@ exports.sign = red25519.sign
 
 exports.verify = red25519.verify
 
+exports.deriveKeyPair = red25519.deriveKeyPair
+
+exports.derivePublicKey = red25519.derivePublicKey
+
+exports.deriveSharedSecret = red25519.deriveSharedSecret
+
+exports.upgrade = red25519.upgrade
+
 exports.encrypt = function (message, publicKey) {
   const ciphertext = b4a.alloc(message.byteLength + sodium.crypto_box_SEALBYTES)
   sodium.crypto_box_seal(ciphertext, message, publicKey)
