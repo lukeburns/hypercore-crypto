@@ -26,6 +26,8 @@ exports.deriveSharedSecret = red25519.deriveSharedSecret
 
 exports.upgrade = red25519.upgrade
 
+exports.upgradePublicKey = red25519.upgradePublicKey
+
 exports.encrypt = function (message, publicKey) {
   const ciphertext = b4a.alloc(message.byteLength + sodium.crypto_box_SEALBYTES)
   sodium.crypto_box_seal(ciphertext, message, publicKey)
