@@ -9,7 +9,7 @@
   "dependencies": {
     "b4a": "^1.6.6",
     "compact-encoding": "^2.15.0",
-    "red25519": "^0.3.0",
+    "red25519": "^0.4.0",
     "sodium-universal": "^5.0.0"
   },
   "devDependencies": {
