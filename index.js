@@ -1,6 +1,8 @@
 const sodium = require('sodium-universal')
 const c = require('compact-encoding')
 const b4a = require('b4a')
+const { ml_dsa44 } = require('@noble/post-quantum/ml-dsa.js')
+const { ml_kem512 } = require('@noble/post-quantum/ml-kem.js')
 
 // https://en.wikipedia.org/wiki/Merkle_tree#Second_preimage_attack
 const LEAF_TYPE = b4a.from([0])
@@ -8,75 +10,119 @@ const PARENT_TYPE = b4a.from([1])
 const ROOT_TYPE = b4a.from([2])
 
 const HYPERCORE = b4a.from('hypercore')
+const NS_MLDSA = b4a.from('hypercore-crypto/v4/mldsa')
+const NS_MLDEM = b4a.from('hypercore-crypto/v4/mldem')
+const PQ_SEAL_VERSION = b4a.from([1])
+
+const MLDSA_PUBLICKEYBYTES = ml_dsa44.lengths.publicKey
+const MLDSA_SIGNATUREBYTES = ml_dsa44.lengths.signature
+const MLDEM_PUBLICKEYBYTES = ml_kem512.lengths.publicKey
+const MLDEM_SECRETKEYBYTES = ml_kem512.lengths.secretKey
+const MLDEM_CIPHERTEXTBYTES = ml_kem512.lengths.cipherText
+
+/** Wire / manifest label for the only supported batch signature (ML-DSA-44, FIPS 204). */
+exports.defaultSignature = 'mldsa44'
+exports.defaultHash = 'blake2b'
+
+exports.isSupportedSignature = function (name) {
+  return name === exports.defaultSignature
+}
 
 exports.keyPair = function (seed) {
-  // key pairs might stay around for a while, so better not to use a default slab to avoid retaining it completely
-  const slab = b4a.allocUnsafeSlow(
-    sodium.crypto_sign_PUBLICKEYBYTES + sodium.crypto_sign_SECRETKEYBYTES
-  )
-  const publicKey = slab.subarray(0, sodium.crypto_sign_PUBLICKEYBYTES)
-  const secretKey = slab.subarray(sodium.crypto_sign_PUBLICKEYBYTES)
-
-  if (seed) sodium.crypto_sign_seed_keypair(publicKey, secretKey, seed)
-  else sodium.crypto_sign_keypair(publicKey, secretKey)
-
-  return {
-    publicKey,
-    secretKey
-  }
+  if (!seed) return normalizeNoblePair(ml_dsa44.keygen())
+  return exports.mlDsaKeyPair(seed)
 }
 
 exports.validateKeyPair = function (keyPair) {
-  const pk = b4a.allocUnsafe(sodium.crypto_sign_PUBLICKEYBYTES)
-  sodium.crypto_sign_ed25519_sk_to_pk(pk, keyPair.secretKey)
-  return b4a.equals(pk, keyPair.publicKey)
+  const publicKey = b4a.from(ml_dsa44.getPublicKey(keyPair.secretKey))
+  return b4a.equals(publicKey, keyPair.publicKey)
 }
 
 exports.sign = function (message, secretKey) {
-  // Dedicated slab for the signature, to avoid retaining unneeded mem and for security
-  const signature = b4a.allocUnsafeSlow(sodium.crypto_sign_BYTES)
-  sodium.crypto_sign_detached(signature, message, secretKey)
-  return signature
+  return b4a.from(ml_dsa44.sign(message, secretKey, { extraEntropy: false }))
 }
 
 exports.verify = function (message, signature, publicKey) {
-  if (signature.byteLength !== sodium.crypto_sign_BYTES) return false
-  if (publicKey.byteLength !== sodium.crypto_sign_PUBLICKEYBYTES) return false
-  return sodium.crypto_sign_verify_detached(signature, message, publicKey)
+  if (signature.byteLength !== MLDSA_SIGNATUREBYTES) return false
+  if (publicKey.byteLength !== MLDSA_PUBLICKEYBYTES) return false
+  return ml_dsa44.verify(signature, message, publicKey)
 }
 
 exports.encrypt = function (message, publicKey) {
-  const ciphertext = b4a.alloc(message.byteLength + sodium.crypto_box_SEALBYTES)
-  sodium.crypto_box_seal(ciphertext, message, publicKey)
+  if (publicKey.byteLength !== MLDEM_PUBLICKEYBYTES) {
+    throw new Error(
+      'ML-KEM-512 public key required (expected ' + MLDEM_PUBLICKEYBYTES + ' bytes, got ' + publicKey.byteLength + ')'
+    )
+  }
+
+  const nonce = b4a.allocUnsafe(sodium.crypto_secretbox_NONCEBYTES)
+  sodium.randombytes_buf(nonce)
+
+  const { cipherText, sharedSecret } = ml_kem512.encapsulate(publicKey)
+  const box = b4a.allocUnsafe(message.byteLength + sodium.crypto_secretbox_MACBYTES)
+  sodium.crypto_secretbox_easy(box, message, nonce, sharedSecret)
+
+  const ciphertext = b4a.concat([PQ_SEAL_VERSION, b4a.from(cipherText), nonce, box])
+  b4a.fill(sharedSecret, 0)
   return ciphertext
 }
 
 exports.decrypt = function (ciphertext, keyPair) {
-  if (ciphertext.byteLength < sodium.crypto_box_SEALBYTES) return null
+  if (!ciphertext || ciphertext.byteLength === 0) return null
+  if (ciphertext[0] !== PQ_SEAL_VERSION[0]) return null
+  if (keyPair.secretKey.byteLength !== MLDEM_SECRETKEYBYTES) return null
 
-  const plaintext = b4a.alloc(ciphertext.byteLength - sodium.crypto_box_SEALBYTES)
+  const header = 1 + MLDEM_CIPHERTEXTBYTES + sodium.crypto_secretbox_NONCEBYTES
+  if (ciphertext.byteLength < header + sodium.crypto_secretbox_MACBYTES) return null
 
-  if (!sodium.crypto_box_seal_open(plaintext, ciphertext, keyPair.publicKey, keyPair.secretKey)) {
-    return null
-  }
+  let offset = 1
+  const kemCiphertext = ciphertext.subarray(offset, offset + MLDEM_CIPHERTEXTBYTES)
+  offset += MLDEM_CIPHERTEXTBYTES
 
+  const nonce = ciphertext.subarray(offset, offset + sodium.crypto_secretbox_NONCEBYTES)
+  offset += sodium.crypto_secretbox_NONCEBYTES
+
+  const box = ciphertext.subarray(offset)
+  if (box.byteLength < sodium.crypto_secretbox_MACBYTES) return null
+
+  const plaintext = b4a.allocUnsafe(box.byteLength - sodium.crypto_secretbox_MACBYTES)
+  const sharedSecret = b4a.from(ml_kem512.decapsulate(kemCiphertext, keyPair.secretKey))
+
+  const ok = sodium.crypto_secretbox_open_easy(plaintext, box, nonce, sharedSecret)
+  b4a.fill(sharedSecret, 0)
+
+  if (!ok) return null
   return plaintext
 }
 
 exports.encryptionKeyPair = function (seed) {
-  const publicKey = b4a.alloc(sodium.crypto_box_PUBLICKEYBYTES)
-  const secretKey = b4a.alloc(sodium.crypto_box_SECRETKEYBYTES)
+  if (!seed) return normalizeNoblePair(ml_kem512.keygen())
+  return exports.mlDemKeyPair(seed)
+}
 
-  if (seed) {
-    sodium.crypto_box_seed_keypair(publicKey, secretKey, seed)
-  } else {
-    sodium.crypto_box_keypair(publicKey, secretKey)
-  }
+exports.kdf = function (primaryKey, namespace, length = 32) {
+  if (!primaryKey || primaryKey.byteLength === 0) throw new Error('Must pass a primaryKey buffer')
+  const ns = typeof namespace === 'string' ? b4a.from(namespace) : namespace
+  if (!ns || ns.byteLength === 0) throw new Error('Must pass a namespace buffer')
+  if (!(length > 0)) throw new Error('length must be > 0')
 
-  return {
-    publicKey,
-    secretKey
-  }
+  const out = b4a.allocUnsafe(length)
+  sodium.crypto_generichash_batch(out, [ns, primaryKey])
+  return out
+}
+
+exports.mlDsaKeyPair = function (primaryKey, namespace = NS_MLDSA) {
+  const seed = exports.kdf(primaryKey, namespace, ml_dsa44.lengths.seed)
+  const pair = normalizeNoblePair(ml_dsa44.keygen(seed))
+  b4a.fill(seed, 0)
+  return pair
+}
+
+exports.mlDemKeyPair = function (primaryKey, namespace = NS_MLDEM) {
+  const seed = exports.kdf(primaryKey, namespace, ml_kem512.lengths.seed)
+  const pair = normalizeNoblePair(ml_kem512.keygen(seed))
+  b4a.fill(seed, 0)
+  return pair
 }
 
 exports.data = function (data) {
@@ -140,10 +186,10 @@ exports.randomBytes = function (n) {
 }
 
 exports.discoveryKey = function (key) {
-  if (!key || key.byteLength !== 32) throw new Error('Must pass a 32 byte buffer')
+  if (!key || key.byteLength === 0) throw new Error('Must pass a non-empty key buffer')
   // Discovery keys might stay around for a while, so better not to use slab memory (for better gc)
   const digest = b4a.allocUnsafeSlow(32)
-  sodium.crypto_generichash(digest, HYPERCORE, key)
+  sodium.crypto_generichash_batch(digest, [HYPERCORE, key])
   return digest
 }
 
@@ -180,4 +226,11 @@ function range(count) {
   const arr = new Array(count)
   for (let i = 0; i < count; i++) arr[i] = i
   return arr
+}
+
+function normalizeNoblePair(pair) {
+  return {
+    publicKey: b4a.from(pair.publicKey),
+    secretKey: b4a.from(pair.secretKey)
+  }
 }

@@ -2,6 +2,8 @@ const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('./')
 const sodium = require('sodium-universal')
+const { ml_dsa44 } = require('@noble/post-quantum/ml-dsa.js')
+const { ml_kem512 } = require('@noble/post-quantum/ml-kem.js')
 
 test('randomBytes', function (t) {
   const buffer = crypto.randomBytes(100)
@@ -12,14 +14,8 @@ test('randomBytes', function (t) {
 test('key pair', function (t) {
   const keyPair = crypto.keyPair()
 
-  t.is(keyPair.publicKey.length, 32)
-  t.is(keyPair.secretKey.length, 64)
-  t.is(keyPair.publicKey.buffer.byteLength, 96, 'small slab')
-  t.is(
-    keyPair.publicKey.buffer,
-    keyPair.secretKey.buffer,
-    'public and seret key share the same slab'
-  )
+  t.is(keyPair.publicKey.length, ml_dsa44.lengths.publicKey)
+  t.is(keyPair.secretKey.length, ml_dsa44.lengths.secretKey)
 })
 
 test('validate key pair', function (t) {
@@ -36,10 +32,88 @@ test('sign', function (t) {
 
   const sig = crypto.sign(message, keyPair.secretKey)
 
-  t.is(sig.length, 64)
+  t.is(sig.length, ml_dsa44.lengths.signature)
   t.ok(crypto.verify(message, sig, keyPair.publicKey))
-  t.absent(crypto.verify(message, b4a.alloc(64), keyPair.publicKey))
-  t.is(sig.buffer.byteLength, sodium.crypto_sign_BYTES, 'dedicated slab for signatures')
+  t.absent(crypto.verify(message, b4a.alloc(ml_dsa44.lengths.signature - 1), keyPair.publicKey))
+})
+
+test('encryption key pair', function (t) {
+  const primaryKey = crypto.randomBytes(32)
+  const kp1 = crypto.encryptionKeyPair(primaryKey)
+  const kp2 = crypto.encryptionKeyPair(primaryKey)
+  const kp3 = crypto.encryptionKeyPair(crypto.randomBytes(32))
+
+  t.is(kp1.publicKey.length, ml_kem512.lengths.publicKey)
+  t.is(kp1.secretKey.length, ml_kem512.lengths.secretKey)
+  t.alike(kp1, kp2)
+  t.unlike(kp1.publicKey, kp3.publicKey)
+})
+
+test('encrypt/decrypt roundtrip (pq)', function (t) {
+  const pair = crypto.encryptionKeyPair()
+  const message = b4a.from('pq ciphertext payload')
+  const ciphertext = crypto.encrypt(message, pair.publicKey)
+  const plaintext = crypto.decrypt(ciphertext, pair)
+
+  t.unlike(ciphertext, message)
+  t.alike(plaintext, message)
+})
+
+test('encrypt rejects non-ML-KEM public keys', function (t) {
+  t.exception(function () {
+    crypto.encrypt(b4a.from('x'), b4a.alloc(32))
+  }, /ML-KEM-512 public key required/)
+})
+
+test('default signature and hash labels', function (t) {
+  t.is(crypto.defaultSignature, 'mldsa44')
+  t.is(crypto.defaultHash, 'blake2b')
+  t.ok(crypto.isSupportedSignature('mldsa44'))
+  t.absent(crypto.isSupportedSignature('ed25519'))
+})
+
+test('decrypt returns null for wrong key pair', function (t) {
+  const senderTarget = crypto.encryptionKeyPair()
+  const wrong = crypto.encryptionKeyPair()
+  const message = b4a.from('wrong key should fail')
+  const ciphertext = crypto.encrypt(message, senderTarget.publicKey)
+
+  t.is(crypto.decrypt(ciphertext, wrong), null)
+})
+
+test('kdf deterministic + namespace separated', function (t) {
+  const primaryKey = b4a.from('deterministic-primary-key-material')
+  const nsA1 = crypto.kdf(primaryKey, b4a.from('app/ns-a'))
+  const nsA2 = crypto.kdf(primaryKey, b4a.from('app/ns-a'))
+  const nsB = crypto.kdf(primaryKey, b4a.from('app/ns-b'))
+
+  t.alike(nsA1, nsA2)
+  t.unlike(nsA1, nsB)
+})
+
+test('ml dsa key derivation deterministic + namespace separated', function (t) {
+  const primaryKey = crypto.randomBytes(32)
+  const keyPairA1 = crypto.mlDsaKeyPair(primaryKey, b4a.from('dsa/ns-a'))
+  const keyPairA2 = crypto.mlDsaKeyPair(primaryKey, b4a.from('dsa/ns-a'))
+  const keyPairB = crypto.mlDsaKeyPair(primaryKey, b4a.from('dsa/ns-b'))
+
+  t.alike(keyPairA1, keyPairA2)
+  t.unlike(keyPairA1.publicKey, keyPairB.publicKey)
+  t.unlike(keyPairA1.secretKey, keyPairB.secretKey)
+  t.ok(crypto.validateKeyPair(keyPairA1))
+})
+
+test('ml dem key derivation deterministic + namespace separated', function (t) {
+  const primaryKey = crypto.randomBytes(32)
+  const keyPairA1 = crypto.mlDemKeyPair(primaryKey, b4a.from('dem/ns-a'))
+  const keyPairA2 = crypto.mlDemKeyPair(primaryKey, b4a.from('dem/ns-a'))
+  const keyPairB = crypto.mlDemKeyPair(primaryKey, b4a.from('dem/ns-b'))
+
+  t.alike(keyPairA1, keyPairA2)
+  t.unlike(keyPairA1.publicKey, keyPairB.publicKey)
+  t.unlike(keyPairA1.secretKey, keyPairB.secretKey)
+  t.is(keyPairA1.publicKey.length, ml_kem512.lengths.publicKey)
+  t.is(keyPairA1.secretKey.length, ml_kem512.lengths.secretKey)
 })
 
 test('hash leaf', function (t) {
@@ -148,7 +222,7 @@ test('random namespace', function (t) {
 })
 
 test('discovery key does not use slabs', function (t) {
-  const key = b4a.allocUnsafe(32)
+  const key = crypto.keyPair().publicKey
   const discKey = crypto.discoveryKey(key)
   t.is(discKey.buffer.byteLength, 32, 'does not use slab memory')
 })

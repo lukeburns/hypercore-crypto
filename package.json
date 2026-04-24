@@ -1,12 +1,13 @@
 {
-  "name": "hypercore-crypto",
-  "version": "3.6.1",
+  "name": "@lukeburns/hypercore-crypto",
+  "version": "3.6.6",
   "description": "The crypto primitives used in hypercore, extracted into a separate module",
   "main": "index.js",
   "files": [
     "index.js"
   ],
   "dependencies": {
+    "@noble/post-quantum": "^0.6.1",
     "b4a": "^1.6.6",
     "compact-encoding": "^2.15.0",
     "sodium-universal": "^5.0.0"
@@ -33,5 +34,8 @@
   "bugs": {
     "url": "https://github.com/mafintosh/hypercore-crypto/issues"
   },
-  "homepage": "https://github.com/mafintosh/hypercore-crypto"
+  "homepage": "https://github.com/mafintosh/hypercore-crypto",
+  "publishConfig": {
+    "access": "restricted"
+  }
 }
